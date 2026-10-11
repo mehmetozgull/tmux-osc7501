@@ -66,7 +66,7 @@ program ──(OSC 7501)──▶ pane pty ──▶ tmux ──▶ ekran
 **Elle kurulum:**
 
 ```sh
-git clone <repo-adresin> ~/.tmux/plugins/tmux-osc7501   # ya da zip'i bu klasöre aç
+git clone https://github.com/mehmetozgull/tmux-osc7501 ~/.tmux/plugins/tmux-osc7501
 ```
 
 `~/.tmux.conf` dosyasına, tema eklentilerinden **sonra** gelecek şekilde şu satırı ekle:
@@ -75,7 +75,7 @@ git clone <repo-adresin> ~/.tmux/plugins/tmux-osc7501   # ya da zip'i bu klasör
 run-shell ~/.tmux/plugins/tmux-osc7501/osc7501.tmux
 ```
 
-**TPM ile kurulum:** Repoyu GitHub'a koyduysan `set -g @plugin '<kullanıcı>/tmux-osc7501'` satırını ekle ve `prefix + I` ile kur.
+**TPM ile kurulum:** `set -g @plugin 'mehmetozgull/tmux-osc7501'` satırını ekle ve `prefix + I` ile kur.
 
 Kurulumdan sonra ayarları yeniden yükle: `tmux source ~/.tmux.conf`
 
@@ -237,3 +237,7 @@ tmux source ~/.tmux.conf
 ```
 
 Claude Code hook'larını kaldırmak için `~/.claude/settings.json` dosyasından `osc7501 claude-hook` içeren girdileri sil.
+
+## Lisans
+
+MIT. Ayrıntılar `LICENSE` dosyasında.

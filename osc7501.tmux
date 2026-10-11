@@ -2,7 +2,7 @@
 # tmux-osc7501 – show OSC 7501 (Program Status Protocol) reports in tmux.
 #
 # Load from ~/.tmux.conf, either with TPM:
-#     set -g @plugin '<you>/tmux-osc7501'
+#     set -g @plugin 'mehmetozgull/tmux-osc7501'
 # or directly:
 #     run-shell ~/.tmux/plugins/tmux-osc7501/osc7501.tmux
 
