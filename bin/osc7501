@@ -11,27 +11,57 @@
       Add the hooks to ~/.claude/settings.json (keeps a .bak copy).
 
 Reports go to /dev/tty, so they reach the terminal even when stdout is
-captured (as it is for Claude Code hooks). Works in any terminal; terminals
-that do not know OSC 7501 ignore it.
+captured. Claude Code runs hooks without a controlling terminal; then the
+report goes to the tmux pane's tty ($TMUX_PANE) instead, so the hooks only
+report inside tmux. Terminals that do not know OSC 7501 ignore it.
 """
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import time
 
 STATES = ("idle", "working", "done", "blocked", "error", "clear")
 KINDS = ("permission", "question", "auth")
 ID_RE = re.compile(r"[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}")
 APP_RE = re.compile(r"[A-Za-z0-9_.+-]{1,32}")
 CLAUDE_APP = "claude-code"
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse",
-               "Notification", "Stop", "SessionEnd")
+# (event, matcher). None of them runs with "async": async hooks are not
+# ordered, so a late PostToolUse could turn Stop's `done` back into `working`.
+HOOKS = (
+    ("SessionStart", None),
+    ("UserPromptSubmit", None),
+    ("PreToolUse", "AskUserQuestion|ExitPlanMode"),
+    ("PermissionRequest", None),
+    ("PostToolUse", None),
+    ("PostToolUseFailure", None),
+    ("Notification", None),
+    ("Stop", None),
+    ("StopFailure", None),
+    ("SessionEnd", None),
+)
+# Events that map straight to a state.
+EVENT_STATES = {"SessionStart": "idle", "UserPromptSubmit": "working",
+                "PostToolUse": "working", "PostToolUseFailure": "working",
+                "Stop": "done"}
+# notification_type -> (state, kind). Types not listed here are ignored:
+# idle_prompt (~60 s after Stop), elicitation_complete/response, agent_completed...
+NOTIFICATIONS = {
+    "permission_prompt": ("blocked", "permission"),
+    "elicitation_dialog": ("blocked", "question"),
+    "elicitation_url_dialog": ("blocked", "question"),
+    "agent_needs_input": ("blocked", "question"),
+    "quota_auto_resume_stale": ("blocked", "question"),
+    "quota_auto_resume_fired": ("working", None),
+}
 
 
 def clean_text(text, max_bytes):
@@ -106,30 +136,55 @@ def emit(seq):
 def claude_report(data):
     """Map a Claude Code hook event to a report (or None)."""
     event = data.get("hook_event_name", "")
-    if event in ("SessionStart",):
-        return build("idle", app=CLAUDE_APP)
-    if event in ("UserPromptSubmit", "PostToolUse"):
-        return build("working", app=CLAUDE_APP)
-    if event == "Stop":
-        return build("done", app=CLAUDE_APP)
+    if event in EVENT_STATES:
+        return build(EVENT_STATES[event], app=CLAUDE_APP)
     if event == "SessionEnd":
         return build("clear")
+    if event == "StopFailure":  # the turn ended on an API error
+        return build("error", app=CLAUDE_APP,
+                     msg=str(data.get("last_assistant_message") or data.get("error", "")))
+    if event == "PermissionRequest":  # Notification only follows ~6 s later
+        return build("blocked", app=CLAUDE_APP, kind="permission",
+                     msg="Claude needs your permission to use %s" % data.get("tool_name", "a tool"))
+    if event == "PreToolUse":
+        return _tool_report(data)
     if event == "Notification":
-        ntype = data.get("notification_type", "")
-        message = data.get("message", "") or ""
-        low = message.lower()
-        # "Claude is waiting for your input" comes ~60 s after Stop. The turn
-        # is finished, so keep showing `done` instead of `blocked`.
-        if ntype in ("idle_prompt", "auth_success") or "waiting for your input" in low:
-            return None
-        if ntype == "permission_prompt" or "permission" in low:
-            kind = "permission"
-        elif ntype == "elicitation_dialog":
-            kind = "question"
-        else:
-            kind = "question"
-        return build("blocked", app=CLAUDE_APP, kind=kind, msg=message)
+        return _notification_report(data)
     return None
+
+
+def _first_question(tool_input):
+    try:
+        return str(tool_input["questions"][0]["question"])
+    except (KeyError, IndexError, TypeError):
+        return "Claude has a question for you"
+
+
+def _tool_report(data):
+    """PreToolUse: the tools that wait for the user."""
+    tool = data.get("tool_name", "")
+    if tool == "AskUserQuestion":
+        return build("blocked", app=CLAUDE_APP, kind="question",
+                     msg=_first_question(data.get("tool_input")))
+    if tool == "ExitPlanMode":
+        return build("blocked", app=CLAUDE_APP, kind="permission",
+                     msg="Claude has a plan for you to review")
+    return None
+
+
+def _notification_report(data):
+    ntype = data.get("notification_type")
+    message = data.get("message") or ""
+    if ntype:
+        state, kind = NOTIFICATIONS.get(ntype, (None, None))
+    elif "permission" in message.lower():  # Claude Code without notification_type
+        state, kind = "blocked", "permission"
+    else:
+        state = kind = None
+    if state is None:
+        return None
+    return build(state, app=CLAUDE_APP, kind=kind,
+                 msg=message if state == "blocked" else None)
 
 
 def cmd_claude_hook():
@@ -145,24 +200,50 @@ def cmd_claude_hook():
     return 0
 
 
+def _is_ours(hook):
+    command = hook.get("command", "")
+    return "osc7501" in command and "claude-hook" in command
+
+
+def _hook_group(command, matcher):
+    group = {"hooks": [{"type": "command", "command": command}]}
+    if matcher:
+        group["matcher"] = matcher
+    return group
+
+
+def add_hooks(settings, command):
+    """Return (new settings, events added). `settings` is left untouched."""
+    new = copy.deepcopy(settings)
+    hooks = new.setdefault("hooks", {})
+    added = []
+    for event, matcher in HOOKS:
+        groups = hooks.setdefault(event, [])
+        if not any(_is_ours(h) for g in groups for h in g.get("hooks", [])):
+            groups.append(_hook_group(command, matcher))
+            added.append(event)
+    return new, added
+
+
+def _backup_path(path):
+    """A new backup name each time, so an older backup is never overwritten."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate, n = "%s.osc7501-%s.bak" % (path, stamp), 1
+    while os.path.exists(candidate):
+        n += 1
+        candidate = "%s.osc7501-%s-%d.bak" % (path, stamp, n)
+    return candidate
+
+
 def cmd_install(settings_path, dry_run):
     path = os.path.expanduser(settings_path)
-    me = os.path.realpath(__file__)
-    command = "'%s' claude-hook" % me if " " in me else "%s claude-hook" % me
+    command = shlex.quote(os.path.realpath(__file__)) + " claude-hook"
     try:
         with open(path) as f:
             settings = json.load(f)
     except FileNotFoundError:
         settings = {}
-    hooks = settings.setdefault("hooks", {})
-    added = []
-    for event in HOOK_EVENTS:
-        groups = hooks.setdefault(event, [])
-        present = any("osc7501" in h.get("command", "") and "claude-hook" in h.get("command", "")
-                      for g in groups for h in g.get("hooks", []))
-        if not present:
-            groups.append({"hooks": [{"type": "command", "command": command}]})
-            added.append(event)
+    settings, added = add_hooks(settings, command)
     text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
     if dry_run:
         sys.stdout.write(text)
@@ -171,14 +252,18 @@ def cmd_install(settings_path, dry_run):
         print("Hooks are already installed in", path)
         return 0
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup = None
     if os.path.exists(path):
-        shutil.copy2(path, path + ".bak")
+        backup = _backup_path(path)
+        shutil.copy2(path, backup)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(text)
     os.replace(tmp, path)
     print("Added hooks for: %s" % ", ".join(added))
-    print("Settings: %s (backup: %s.bak)" % (path, path))
+    print("Settings: %s" % path)
+    if backup:
+        print("Backup: %s" % backup)
     print("Restart running Claude Code sessions to pick them up.")
     return 0
 

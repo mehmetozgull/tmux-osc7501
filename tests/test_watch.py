@@ -192,5 +192,65 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(w.display_text("abcdef", 4), "abc…")
 
 
+class FakeTmux:
+    """Records the commands it is given; answers display-message queries."""
+
+    def __init__(self, answers=None):
+        self.calls = []
+        self.answers = answers or {}
+
+    def run(self, *cmds):
+        self.calls.extend(cmds)
+        first = cmds[0] if cmds else []
+        if first[:1] == ["display-message"] and "-p" in first:
+            return self.answers.get(first[-1], "")
+        return ""
+
+    def pane_sets(self):
+        return {c[4]: c[5] for c in self.calls if c[:2] == ["set-option", "-p"]}
+
+    def pane_unsets(self):
+        return {c[4] for c in self.calls if c[:2] == ["set-option", "-pu"]}
+
+    def messages(self):
+        return [c[-1] for c in self.calls if c[0] == "display-message" and "-d" in c]
+
+
+def summary(state, app="claude-code", **kw):
+    s = {"state": state, "app": app, "kind": "", "msg": "", "progress": "", "title": ""}
+    s.update(kw)
+    return s
+
+
+class PublisherTests(unittest.TestCase):
+    def test_pane_label_and_icon(self):
+        tm = FakeTmux()
+        w.Publisher(tm, "%1").update(summary("blocked", kind="permission"))
+        sets = tm.pane_sets()
+        self.assertEqual(sets["@osc7501_pane_label"], "#[fg=red,bold]! claude#[default]")
+        self.assertEqual(sets["@osc7501_pane_icon"], "#[fg=red,bold]!#[default]")
+
+    def test_idle_has_no_label_or_icon(self):
+        tm = FakeTmux()
+        w.Publisher(tm, "%1").update(summary("idle"))
+        self.assertTrue({"@osc7501_pane_label", "@osc7501_pane_icon"} <= tm.pane_unsets())
+
+    def notified(self, where, scope=""):
+        tm = FakeTmux({w.NOTIFY_QUERY: (where + " " + scope).strip()})
+        w.Publisher(tm, "%1").notify(summary("done"))
+        return bool(tm.messages())
+
+    def test_notify_pane_scope(self):
+        # "window_active session_attached pane_active"
+        self.assertTrue(self.notified("1 1 0"))   # a neighbour pane is focused
+        self.assertFalse(self.notified("1 1 1"))  # this pane is focused
+        self.assertTrue(self.notified("0 1 1"))   # another window is on screen
+        self.assertTrue(self.notified("1 0 1"))   # nobody is attached
+
+    def test_notify_window_scope(self):
+        self.assertFalse(self.notified("1 1 0", "window"))
+        self.assertTrue(self.notified("0 1 1", "window"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,12 +9,14 @@ the spec describes, and mirror a summary into tmux user options:
 
   pane   @osc7501_state  @osc7501_app  @osc7501_kind  @osc7501_msg
          @osc7501_progress  @osc7501_title  @osc7501_ts  @osc7501_pid
+         @osc7501_pane_label  @osc7501_pane_icon
   window @osc7501_label  @osc7501_window_state  @osc7501_window_app
          @osc7501_window_msg  @osc7501_window_pane
 
-The status line shows #{@osc7501_label}. Sending SIGUSR1 marks the pane's
+The status line shows the pane labels/icons (or #{@osc7501_label} in window
+scope). Sending SIGUSR1 marks the pane's
 `done`/`error` records as seen and removes them (the tmux plugin does this when
-you switch to the window).
+the pane comes on screen).
 
 Spec: https://superlogical.com/rex/docs/build/program-status
 """
@@ -258,12 +260,21 @@ DEFAULTS = {
     "format-error": "#[fg=red]✗ {app}#[default]",
     "format-done": "#[fg=green]✓ {app}#[default]",
     "format-idle": "",
+    "icon-working": "#[fg=yellow]●#[default]",
+    "icon-blocked": "#[fg=red,bold]!#[default]",
+    "icon-error": "#[fg=red]✗#[default]",
+    "icon-done": "#[fg=green]✓#[default]",
+    "icon-idle": "",
     "app-aliases": "claude-code=claude",
     "notify": "blocked,error,done",
-    "notify-format": "[#{window_index}:#{window_name}] {app} {state} {kind} {msg}",
+    "notify-format": ("[#{window_index}#{?#{!=:#{window_panes},1},.#{pane_index},}"
+                      ":#{window_name}] {app} {state} {kind} {msg}"),
     "notify-duration": "5000",
     "label-max": "30",
 }
+
+# Is the user looking at the pane already? The last field is the scope.
+NOTIFY_QUERY = "#{window_active} #{session_attached} #{pane_active} #{@osc7501-scope}"
 
 PLACEHOLDER_RE = re.compile(r"( ?)\{(app|state|kind|progress|msg|title)\}")
 
@@ -320,6 +331,7 @@ class Publisher:
 
     def __init__(self, tmux, pane):
         self.tmux, self.pane = tmux, pane
+        self.window = ""  # the window the pane was in at the last update
         self.last = None
         self.last_notify = 0.0
         self.cfg = self._load_config()
@@ -351,6 +363,9 @@ class Publisher:
         out = self.tmux.run(["display-message", "-p", "-t", self.pane, "#{@osc7501_pid}"])
         if out.strip() == str(os.getpid()):
             self.tmux.run(["set-option", "-pu", "-t", self.pane, "@osc7501_pid"])
+        elif self.window:
+            # The pane is gone: its window must not keep showing its label.
+            self.summarize_window(self.window)
 
     def update(self, summary):
         key = tuple(sorted(summary.items())) if summary else None
@@ -359,24 +374,28 @@ class Publisher:
         prev = dict(self.last) if self.last else None
         self.last = key
 
-        cmds = []
-        for k in self.PANE_KEYS:
-            v = summary.get(k, "") if summary else ""
-            name = "@osc7501_" + k
-            if v:
-                cmds.append(["set-option", "-p", "-t", self.pane, name, v])
-            else:
-                cmds.append(["set-option", "-pu", "-t", self.pane, name])
-        if summary:
-            cmds.append(["set-option", "-p", "-t", self.pane, "@osc7501_ts", "%.6f" % time.time()])
-        else:
-            cmds.append(["set-option", "-pu", "-t", self.pane, "@osc7501_ts"])
+        cmds = [["set-option", "-p", "-t", self.pane, name, v] if v
+                else ["set-option", "-pu", "-t", self.pane, name]
+                for name, v in self._pane_options(summary).items()]
         self.tmux.run(*cmds)
         self.update_window()
 
         if summary and summary["state"] in self.notify_states:
             if not prev or (prev.get("state"), prev.get("msg")) != (summary["state"], summary["msg"]):
                 self.notify(summary)
+
+    def _pane_options(self, summary):
+        """Pane option name -> value ('' means unset) for one summary."""
+        opts = {"@osc7501_" + k: summary.get(k, "") if summary else "" for k in self.PANE_KEYS}
+        label = icon = ts = ""
+        if summary:
+            vals = self._values(summary)
+            label = render(self.cfg["format-" + summary["state"]], vals)
+            icon = render(self.cfg["icon-" + summary["state"]], vals)
+            ts = "%.6f" % time.time()
+        opts.update({"@osc7501_pane_label": label, "@osc7501_pane_icon": icon,
+                     "@osc7501_ts": ts})
+        return opts
 
     def _values(self, s):
         limit = int(self.cfg["label-max"]) if self.cfg["label-max"].isdigit() else 30
@@ -391,50 +410,78 @@ class Publisher:
         }
 
     def update_window(self):
-        fmt = "\t".join("#{%s}" % f for f in (
-            "pane_id", "@osc7501_state", "@osc7501_ts", "@osc7501_app", "@osc7501_kind",
-            "@osc7501_progress", "@osc7501_title", "@osc7501_msg"))
-        out = self.tmux.run(["list-panes", "-t", self.pane, "-F", fmt])
+        """Summarize the pane's window and, when the pane has moved
+        (join-pane, break-pane), the window it left."""
+        window = self.summarize_window(self.pane)
+        if self.window and window and window != self.window:
+            self.summarize_window(self.window)
+        self.window = window or self.window
+
+    WINDOW_FMT = "\t".join("#{%s}" % f for f in (
+        "window_id", "pane_id", "@osc7501_state", "@osc7501_ts", "@osc7501_app",
+        "@osc7501_kind", "@osc7501_progress", "@osc7501_title", "@osc7501_msg"))
+
+    def summarize_window(self, target):
+        """Write the window options for TARGET's window; return its id
+        ('' when the window is gone)."""
+        lines = self.tmux.run(["list-panes", "-t", target, "-F", self.WINDOW_FMT]).splitlines()
+        if not lines:
+            return ""
+        window = lines[0].split("\t", 1)[0]
+        self._write_window(window, self._best_pane(lines))
+        return window
+
+    @staticmethod
+    def _best_pane(lines):
+        """(pane id, summary) of the window's most important pane, or None."""
         best = None
-        for line in out.splitlines():
+        for line in lines:
             parts = line.split("\t")
-            if len(parts) != 8:
+            if len(parts) != 9:
                 continue
-            pid, state, ts, app, kind, prog, title, msg = parts
+            _, pane, state, ts, app, kind, prog, title, msg = parts
             if state not in PRIORITY or not ts:
                 continue
             try:
                 tsf = float(ts)
             except ValueError:
                 tsf = 0.0
-            cand = (PRIORITY[state], tsf, pid, {
-                "state": state, "app": app, "kind": kind, "progress": prog,
-                "title": title, "msg": msg})
-            if best is None or cand[:2] > best[:2]:
-                best = cand
-        win = self.pane
+            if best is None or (PRIORITY[state], tsf) > best[0]:
+                best = ((PRIORITY[state], tsf), pane, {
+                    "state": state, "app": app, "kind": kind, "progress": prog,
+                    "title": title, "msg": msg})
+        return best and best[1:]
+
+    def _write_window(self, window, best):
         if best is None:
-            self.tmux.run(*[["set-option", "-wu", "-t", win, n] for n in self.WIN_OPTS.values()])
+            self.tmux.run(*[["set-option", "-wu", "-t", window, n] for n in self.WIN_OPTS.values()])
             return
-        s = best[3]
+        pane, s = best
         label = render(self.cfg["format-" + s["state"]], self._values(s))
-        vals = {"state": s["state"], "label": label, "app": s["app"], "msg": s["msg"], "pane": best[2]}
-        cmds = []
-        for k, name in self.WIN_OPTS.items():
-            if vals[k]:
-                cmds.append(["set-option", "-w", "-t", win, name, vals[k]])
-            else:
-                cmds.append(["set-option", "-wu", "-t", win, name])
-        self.tmux.run(*cmds)
+        vals = {"state": s["state"], "label": label, "app": s["app"], "msg": s["msg"], "pane": pane}
+        self.tmux.run(*[["set-option", "-w", "-t", window, name, vals[k]] if vals[k]
+                        else ["set-option", "-wu", "-t", window, name]
+                        for k, name in self.WIN_OPTS.items()])
+
+    def _on_screen(self):
+        """Is the user looking at this pane already? In window scope, being
+        in the same window counts; in pane scope (default) only the focused
+        pane does, so a neighbour pane still notifies."""
+        parts = self.tmux.run(["display-message", "-p", "-t", self.pane, NOTIFY_QUERY]).split()
+        if len(parts) < 3:
+            return False
+        window_active, attached, pane_active = parts[:3]
+        scope = parts[3] if len(parts) > 3 else "pane"
+        if window_active != "1" or attached == "0":
+            return False
+        return scope == "window" or pane_active == "1"
 
     def notify(self, s):
         now = time.monotonic()
         if now - self.last_notify < 1.0:
             return  # rate limit
-        out = self.tmux.run(["display-message", "-p", "-t", self.pane,
-                             "#{window_active} #{session_attached}"]).split()
-        if len(out) == 2 and out[0] == "1" and out[1] != "0":
-            return  # the window is on screen already
+        if self._on_screen():
+            return
         self.last_notify = now
         vals = self._values(s)
         vals["msg"] = fmt_escape(display_text(s["msg"], 120))
