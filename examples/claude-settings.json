@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-osc7501/bin/osc7501 claude-hook" }] }]
+  }
+}

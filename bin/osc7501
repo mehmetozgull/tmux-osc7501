@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Send OSC 7501 program status reports to the terminal.
+
+  osc7501 STATE [-a APP] [-i ID] [-k KIND] [-p N] [-m MSG] [-t TITLE]
+      STATE: idle | working | done | blocked | error | clear
+  osc7501 run [-a APP] [-i ID] -- COMMAND...
+      working while COMMAND runs, then done (exit 0) or error.
+  osc7501 claude-hook
+      Claude Code hook mode: reads the hook JSON on stdin.
+  osc7501 install-claude-hooks [--settings PATH] [--dry-run]
+      Add the hooks to ~/.claude/settings.json (keeps a .bak copy).
+
+Reports go to /dev/tty, so they reach the terminal even when stdout is
+captured (as it is for Claude Code hooks). Works in any terminal; terminals
+that do not know OSC 7501 ignore it.
+"""
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+
+STATES = ("idle", "working", "done", "blocked", "error", "clear")
+KINDS = ("permission", "question", "auth")
+ID_RE = re.compile(r"[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}")
+APP_RE = re.compile(r"[A-Za-z0-9_.+-]{1,32}")
+CLAUDE_APP = "claude-code"
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse",
+               "Notification", "Stop", "SessionEnd")
+
+
+def clean_text(text, max_bytes):
+    """One line, no control characters, at most max_bytes of UTF-8."""
+    text = "".join(" " if (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F) else c for c in text)
+    text = " ".join(text.split())
+    raw = text.encode("utf-8")
+    if len(raw) > max_bytes:
+        raw = raw[:max_bytes].decode("utf-8", "ignore").encode("utf-8")
+    return raw
+
+
+def build(state, app=None, rid=None, kind=None, progress=None, msg=None, title=None):
+    pairs = ["state=" + state]
+    if rid:
+        if not ID_RE.fullmatch(rid) or len(rid) > 128:
+            raise ValueError("invalid id: %r" % rid)
+        pairs.append("id=" + rid)
+    if state != "clear":
+        if app:
+            if not APP_RE.fullmatch(app):
+                raise ValueError("invalid app: %r" % app)
+            pairs.append("app=" + app)
+        if kind and state == "blocked":
+            if kind not in KINDS:
+                raise ValueError("kind must be one of " + ", ".join(KINDS))
+            pairs.append("kind=" + kind)
+        if progress is not None and state in ("working", "blocked"):
+            pairs.append("progress=%d" % max(0, min(100, int(progress))))
+        if title:
+            pairs.append("title=" + base64.b64encode(clean_text(title, 192)).decode())
+        if msg:
+            pairs.append("msg=" + base64.b64encode(clean_text(msg, 2048)).decode())
+    return ("\x1b]7501;" + ":".join(pairs) + "\x1b\\").encode()
+
+
+def _pane_tty():
+    pane = os.environ.get("TMUX_PANE")
+    if not pane or not shutil.which("tmux"):
+        return None
+    try:
+        out = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{pane_tty}"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3)
+        return out.stdout.decode().strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def emit(seq):
+    """Write to the controlling terminal; fall back to the tmux pane's tty."""
+    for path in ("/dev/tty", None):
+        if path is None:
+            path = _pane_tty()
+            if not path:
+                break
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NOCTTY)
+        except OSError:
+            continue
+        try:
+            os.write(fd, seq)
+            return True
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return False
+
+
+# --- Claude Code ----------------------------------------------------------
+
+def claude_report(data):
+    """Map a Claude Code hook event to a report (or None)."""
+    event = data.get("hook_event_name", "")
+    if event in ("SessionStart",):
+        return build("idle", app=CLAUDE_APP)
+    if event in ("UserPromptSubmit", "PostToolUse"):
+        return build("working", app=CLAUDE_APP)
+    if event == "Stop":
+        return build("done", app=CLAUDE_APP)
+    if event == "SessionEnd":
+        return build("clear")
+    if event == "Notification":
+        ntype = data.get("notification_type", "")
+        message = data.get("message", "") or ""
+        low = message.lower()
+        # "Claude is waiting for your input" comes ~60 s after Stop. The turn
+        # is finished, so keep showing `done` instead of `blocked`.
+        if ntype in ("idle_prompt", "auth_success") or "waiting for your input" in low:
+            return None
+        if ntype == "permission_prompt" or "permission" in low:
+            kind = "permission"
+        elif ntype == "elicitation_dialog":
+            kind = "question"
+        else:
+            kind = "question"
+        return build("blocked", app=CLAUDE_APP, kind=kind, msg=message)
+    return None
+
+
+def cmd_claude_hook():
+    # Never break Claude Code: no stdout (it would be fed to the model for
+    # some events), no errors, always exit 0.
+    try:
+        data = json.load(sys.stdin)
+        seq = claude_report(data)
+        if seq:
+            emit(seq)
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_install(settings_path, dry_run):
+    path = os.path.expanduser(settings_path)
+    me = os.path.realpath(__file__)
+    command = "'%s' claude-hook" % me if " " in me else "%s claude-hook" % me
+    try:
+        with open(path) as f:
+            settings = json.load(f)
+    except FileNotFoundError:
+        settings = {}
+    hooks = settings.setdefault("hooks", {})
+    added = []
+    for event in HOOK_EVENTS:
+        groups = hooks.setdefault(event, [])
+        present = any("osc7501" in h.get("command", "") and "claude-hook" in h.get("command", "")
+                      for g in groups for h in g.get("hooks", []))
+        if not present:
+            groups.append({"hooks": [{"type": "command", "command": command}]})
+            added.append(event)
+    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    if dry_run:
+        sys.stdout.write(text)
+        return 0
+    if not added:
+        print("Hooks are already installed in", path)
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    print("Added hooks for: %s" % ", ".join(added))
+    print("Settings: %s (backup: %s.bak)" % (path, path))
+    print("Restart running Claude Code sessions to pick them up.")
+    return 0
+
+
+# --- run wrapper ----------------------------------------------------------
+
+def cmd_run(app, rid, command):
+    if not command:
+        sys.stderr.write("osc7501 run: missing command\n")
+        return 2
+    app = app or os.path.basename(command[0])[:32]
+    if not APP_RE.fullmatch(app):
+        app = None
+    emit(build("working", app=app, rid=rid))
+    try:
+        proc = subprocess.Popen(command)
+    except OSError as e:
+        emit(build("error", app=app, rid=rid, msg=str(e)))
+        sys.stderr.write("osc7501 run: %s\n" % e)
+        return 127
+    while True:
+        try:
+            code = proc.wait()
+            break
+        except KeyboardInterrupt:
+            # The child got the SIGINT too; wait for it, then report idle
+            # (the spec: a cancelled program reports idle).
+            try:
+                code = proc.wait()
+            except KeyboardInterrupt:
+                proc.kill()
+                code = proc.wait()
+            emit(build("idle", app=app, rid=rid))
+            return 128 + signal.SIGINT
+    if code == 0:
+        emit(build("done", app=app, rid=rid, msg=" ".join(command)))
+    else:
+        emit(build("error", app=app, rid=rid, msg="exit %d: %s" % (code, " ".join(command))))
+    return code if code >= 0 else 128 - code
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] == "claude-hook":
+        return cmd_claude_hook()
+
+    if len(argv) > 1 and argv[1] == "install-claude-hooks":
+        p = argparse.ArgumentParser(prog="osc7501 install-claude-hooks")
+        p.add_argument("--settings", default="~/.claude/settings.json")
+        p.add_argument("--dry-run", action="store_true")
+        a = p.parse_args(argv[2:])
+        return cmd_install(a.settings, a.dry_run)
+
+    if len(argv) > 1 and argv[1] == "run":
+        p = argparse.ArgumentParser(prog="osc7501 run")
+        p.add_argument("-a", "--app")
+        p.add_argument("-i", "--id")
+        p.add_argument("command", nargs=argparse.REMAINDER)
+        a = p.parse_args(argv[2:])
+        cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
+        return cmd_run(a.app, a.id, cmd)
+
+    p = argparse.ArgumentParser(prog="osc7501", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("state", choices=STATES)
+    p.add_argument("-a", "--app")
+    p.add_argument("-i", "--id")
+    p.add_argument("-k", "--kind", choices=KINDS)
+    p.add_argument("-p", "--progress", type=int)
+    p.add_argument("-m", "--msg")
+    p.add_argument("-t", "--title")
+    p.add_argument("--print", action="store_true", help="print the escaped sequence instead")
+    a = p.parse_args(argv[1:])
+    try:
+        seq = build(a.state, a.app, a.id, a.kind, a.progress, a.msg, a.title)
+    except ValueError as e:
+        p.error(str(e))
+    if a.print:
+        print(repr(seq.decode()))
+        return 0
+    return 0 if emit(seq) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
