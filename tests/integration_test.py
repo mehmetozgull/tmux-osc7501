@@ -20,8 +20,13 @@ EMIT = os.path.join(ROOT, "bin", "osc7501")
 SOCK = "osc7501-test-%d" % os.getpid()
 
 
+# A plain shell: the user's own shell config may mark prompts (OSC 133;A),
+# which by the spec drops the `working` reports these tests send.
+TEST_ENV = dict(os.environ, SHELL="/bin/sh")
+
+
 def tmux(*args, check=True):
-    out = subprocess.run(["tmux", "-L", SOCK, "-f", "/dev/null"] + list(args),
+    out = subprocess.run(["tmux", "-L", SOCK, "-f", "/dev/null"] + list(args), env=TEST_ENV,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if check and out.returncode != 0:
         raise RuntimeError("tmux %s: %s" % (args, out.stderr))
@@ -343,6 +348,29 @@ class Integration(unittest.TestCase):
         self.emit(moved, "working", "-a", "make")  # first report after the move
         self.assertEqual(wait_for(win_state, ""), "")
         tmux("kill-window", "-t", "t:5")
+
+    def test_15_restart_watchers(self):
+        restart = os.path.join(ROOT, "scripts", "osc7501_restart.sh")
+        live = lambda pane: opt(pane, "@osc7501_pid")
+        before = live(self.p0)
+        # a watcher killed like `pkill` would: the pane is quiet, so tmux
+        # still thinks it is piped
+        tmux("new-window", "-t", "t:7", "sleep 600")
+        quiet = tmux("display", "-p", "-t", "t:7", "#{pane_id}")
+        self.assertTrue(wait_for(lambda: live(quiet) != "", True))
+        os.kill(int(live(quiet)), 15)
+        time.sleep(0.3)
+        self.assertEqual(tmux("display", "-p", "-t", quiet, "#{pane_pipe}"), "1")
+        subprocess.run([restart], env=dict(TEST_ENV, TMUX=self.socket()), check=True)
+        alive = lambda pane: subprocess.run(["ps", "-p", live(pane) or "0", "-o", "args="],
+                                            capture_output=True, text=True).stdout
+        self.assertTrue(wait_for(lambda: "osc7501_watch.py" in alive(quiet), True))
+        self.assertTrue(wait_for(lambda: live(self.p0) not in ("", before), True))
+        self.assertIn("osc7501_watch.py", alive(self.p0))
+        tmux("kill-window", "-t", "t:7")
+
+    def socket(self):
+        return tmux("display", "-p", "#{socket_path}") + ",0,0"
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -176,11 +176,16 @@ set -g pane-border-format '#{?pane_active,#[reverse],}#{pane_index}#[default]#{o
 
 Claude Code pane başlığına o anki işin konusunu yazdığı için kenarlıkta şöyle bir satır görürsün: `2 ! claude "✳ refactor-auth"`.
 
-**Kenarlık rengi durumu göstersin:** onay bekleyen ya da hata veren pane kırmızı, çalışan sarı, biten yeşil, boştaki gri; seçili pane hep camgöbeği.
+### Durum renginde üst çizgi
+
+İki pane arasındaki dikey çizgi tek renkli olabilir ve tmux onu her zaman soldaki pane'e verir; bu yüzden durum rengini dikey çizgilere vermek yanıltır (komşu pane'in rengi seçili pane'i ezer). Bunun yerine her pane durumunu kendi üst çizgisinde gösterebilir; paylaşılan dikey çizgiler nötr kalır, seçili pane camgöbeği çerçeveyle belli olur. Çizgi `#{R:━,#{pane_width}}` ile çizilir; birçok temada düz `yellow`/`red` koyu durduğu için parlak tonlar daha iyi okunur.
 
 ```tmux
-set -g pane-border-style '#{?#{||:#{==:#{@osc7501_state},blocked},#{==:#{@osc7501_state},error}},fg=red,#{?#{==:#{@osc7501_state},working},fg=yellow,#{?#{==:#{@osc7501_state},done},fg=green,fg=colour240}}}'
-set -g pane-active-border-style 'fg=cyan'
+set -g @osc7501-pane-border on
+set -g @osc7501-renk '#{?#{||:#{==:#{@osc7501_state},blocked},#{==:#{@osc7501_state},error}},fg=brightred,#{?#{==:#{@osc7501_state},working},fg=brightyellow,#{?#{==:#{@osc7501_state},done},fg=brightgreen,#{?pane_active,fg=brightcyan,fg=colour240}}}}'
+set -g pane-border-format '#{?pane_active,#[reverse],}#{pane_index}#[default]#{osc7501} "#{pane_title}" #[#{E:@osc7501-renk}]#{R:━,#{pane_width}}'
+set -g pane-border-style 'fg=colour240'
+set -g pane-active-border-style 'fg=brightcyan'
 ```
 
 ### Etiketin yeri
@@ -204,7 +209,7 @@ Eklenti `#{osc7501}`'i status bar'da `#{E:@osc7501_status}`, pane kenarlığınd
 
 - **Pane başına tek pipe:** tmux her pane'de yalnızca bir `pipe-pane`'e izin verir. Pane zaten pipe ediliyorsa (örneğin tmux-logging ile), eklenti o pane'i atlar ve diğer pipe'ı bozmaz.
 - **Bellek:** Her pane için bir izleyici çalışır ve her biri yaklaşık 13 MB RAM kullanır.
-- **Config yeniden yüklemesi:** `tmux source` çalışan izleyicileri yeniden başlatmaz. Eklentinin kodunu güncellediysen önce `pkill -f osc7501_watch.py`, sonra `tmux source ~/.tmux.conf` çalıştır.
+- **Config yeniden yüklemesi:** `tmux source` çalışan izleyicileri yeniden başlatmaz. Eklentinin kodunu güncellediysen `~/.tmux/plugins/tmux-osc7501/scripts/osc7501_restart.sh` çalıştır. `pkill -f osc7501_watch.py` kullanma: tmux, `pipe-pane -O`'da okuyucunun gittiğini ancak pane yeni çıktı yazınca fark eder, bu yüzden sessiz pane'ler izleyicisiz kalır.
 - **`prefix ;` (last-pane):** tmux'ta bu komut için bir `after-` hook'u yok. Bu tuşla döndüğün pane'deki `✓`/`✗`'nin silinmesi için `set -g focus-events on` gerekir. Pane'i seçme, fareyle tıklama ve pencere değiştirme bu ayar olmadan da çalışır.
 - **Zaten içinde olduğun pane:** tmux, aktif pane yeniden seçildiğinde (örneğin içine tekrar tıkladığında) hook çalıştırmıyor. İçinde olduğun pane'de beliren `✓`, bir sonraki istekte ya da başka bir pane'e geçip döndüğünde kalkar.
 - **Esc ile durdurma:** Claude'u Esc ile durdurduğunda Claude Code `Stop` hook'unu çalıştırmıyor. Bu yüzden etiket bir sonraki isteğe kadar `●` olarak kalır.
