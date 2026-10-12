@@ -346,8 +346,10 @@ NEIGHBOUR_FMT = "\t".join("#{%s}" % f for f in (
     "@osc7501_state", "@osc7501_rn_state"))
 
 
-def update_neighbours(tmux, target, only_for=None):
-    """Write @osc7501_rn_state for the panes of TARGET's window."""
+def neighbour_commands(tmux, target, only_for=None, states=None):
+    """set-option commands that bring @osc7501_rn_state up to date for the
+    panes of TARGET's window. STATES overrides pane states: a watcher passes
+    the state it is about to publish."""
     panes, current = [], {}
     for line in tmux.run(["list-panes", "-t", target, "-F", NEIGHBOUR_FMT]).splitlines():
         parts = line.split("\t")
@@ -358,14 +360,28 @@ def update_neighbours(tmux, target, only_for=None):
             geometry = [int(v) for v in (left, right, top, bottom)]
         except ValueError:
             continue
+        state = (states or {}).get(pane, state)
         panes.append(dict(zip(("left", "right", "top", "bottom"), geometry), id=pane, state=state))
         current[pane] = rn_state
-    cmds = [["set-option", "-p", "-t", pane, "@osc7501_rn_state", state] if state
+    return [["set-option", "-p", "-t", pane, "@osc7501_rn_state", state] if state
             else ["set-option", "-pu", "-t", pane, "@osc7501_rn_state"]
             for pane, state in right_neighbour_states(panes, only_for).items()
             if current.get(pane) != state]
-    if cmds:
-        tmux.run(*cmds)
+
+
+def update_neighbours(tmux, window):
+    """Recompute WINDOW after a layout change. tmux redrew the borders for
+    the new layout before this ran, and writing a pane option does not
+    redraw them, so redraw the clients that show the window."""
+    cmds = neighbour_commands(tmux, window)
+    if not cmds:
+        return
+    tmux.run(*cmds)
+    win_id = tmux.run(["display-message", "-p", "-t", window, "#{window_id}"]).strip()
+    for line in tmux.run(["list-clients", "-F", "#{client_name}\t#{window_id}"]).splitlines():
+        name, _, shown = line.partition("\t")
+        if name and shown == win_id:
+            tmux.run(["refresh-client", "-t", name])
 
 
 class Publisher:
@@ -424,10 +440,15 @@ class Publisher:
         cmds = [["set-option", "-p", "-t", self.pane, name, v] if v
                 else ["set-option", "-pu", "-t", self.pane, name]
                 for name, v in self._pane_options(summary).items()]
+        if self.cfg["left-lines"] == "on":
+            # tmux redraws the borders when this pane's label changes, so the
+            # left neighbour must hold the new state first, in the same
+            # command: tmux runs a whole command list before it redraws.
+            state = summary["state"] if summary else ""
+            cmds = neighbour_commands(self.tmux, self.pane, only_for=self.pane,
+                                      states={self.pane: state}) + cmds
         self.tmux.run(*cmds)
         self.update_window()
-        if self.cfg["left-lines"] == "on":
-            update_neighbours(self.tmux, self.pane, only_for=self.pane)
 
         if summary and summary["state"] in self.notify_states:
             if not prev or (prev.get("state"), prev.get("msg")) != (summary["state"], summary["msg"]):

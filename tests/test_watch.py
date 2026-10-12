@@ -223,12 +223,14 @@ class FakeTmux:
 
     def __init__(self, answers=None):
         self.calls = []
+        self.runs = []  # one entry per tmux invocation
         self.answers = answers or {}
 
     def run(self, *cmds):
         self.calls.extend(cmds)
+        self.runs.append(list(cmds))
         first = cmds[0] if cmds else []
-        if first[:1] == ["display-message"] and "-p" in first:
+        if (first[:1] == ["display-message"] and "-p" in first) or first[:1] == ["list-panes"]:
             return self.answers.get(first[-1], "")
         return ""
 
@@ -265,6 +267,19 @@ class PublisherTests(unittest.TestCase):
         tm = FakeTmux()
         w.Publisher(tm, "%1").update(summary("blocked"))
         self.assertFalse(any("@osc7501_rn_state" in c for c in tm.calls))
+
+    def test_left_line_is_written_before_the_label_in_one_command(self):
+        # tmux redraws the borders when a pane's label changes; the left
+        # neighbour must already hold the new state by then.
+        listing = "%0\t0\t9\t0\t9\t\t\n%1\t11\t20\t0\t9\tworking\tx"
+        tm = FakeTmux({w.NEIGHBOUR_FMT: listing})
+        pub = w.Publisher(tm, "%1")
+        pub.cfg["left-lines"] = "on"
+        pub.update(summary("blocked"))
+        run = next(r for r in tm.runs if ["set-option", "-p", "-t", "%1", "@osc7501_state", "blocked"] in r)
+        rn = ["set-option", "-p", "-t", "%0", "@osc7501_rn_state", "blocked"]
+        self.assertIn(rn, run)
+        self.assertLess(run.index(rn), run.index(["set-option", "-p", "-t", "%1", "@osc7501_state", "blocked"]))
 
     def notified(self, where, scope=""):
         tm = FakeTmux({w.NOTIFY_QUERY: (where + " " + scope).strip()})
