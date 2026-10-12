@@ -384,6 +384,43 @@ def update_neighbours(tmux, window):
             tmux.run(["refresh-client", "-t", name])
 
 
+ZORDER_FMT = "#{window_zoomed_flag}\t#{window_layout}\t#{@osc7501_zorder}"
+PANE_POS_FMT = "#{pane_top}\t#{pane_left}\t#{pane_id}"
+
+
+def pane_order(tmux, window):
+    """The window's pane ids from top left to bottom right."""
+    rows = []
+    for line in tmux.run(["list-panes", "-t", window, "-F", PANE_POS_FMT]).splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return " ".join(pane for _, _, pane in sorted(rows))
+
+
+def normalize_zorder(tmux, window):
+    """Re-apply WINDOW's layout so that each shared border belongs to the
+    pane on its left. tmux 3.7 gives a border between two tiled panes to the
+    one higher in its z-order, which depends on how the panes were created;
+    applying a layout string rebuilds that order from the layout, left to
+    right, without moving anything. This runs only when the order of the
+    panes changed (split, close, move, swap), never on a plain resize, which
+    a re-applied layout could snap back during a mouse drag. Zoomed windows
+    are left alone: a layout would unzoom them."""
+    parts = tmux.run(["display-message", "-p", "-t", window, ZORDER_FMT]).rstrip("\n").split("\t")
+    if len(parts) != 3:
+        return False
+    zoomed, layout, done = parts
+    if zoomed == "1" or not layout:
+        return False
+    order = pane_order(tmux, window)
+    if not order or order == done:
+        return False
+    tmux.run(["set-option", "-w", "-t", window, "@osc7501_zorder", order],
+             ["select-layout", "-t", window, layout])
+    return True
+
+
 class Publisher:
     PANE_KEYS = ("state", "app", "kind", "msg", "progress", "title")
     # Window options use their own names: pane options inherit from window
@@ -568,7 +605,9 @@ def main(argv):
     if argv[1] == "--neighbours":  # run by the window-layout-changed hook
         if len(argv) < 3:
             return 2
-        update_neighbours(Tmux(argv[3] if len(argv) > 3 else ""), argv[2])
+        tmux = Tmux(argv[3] if len(argv) > 3 else "")
+        normalize_zorder(tmux, argv[2])
+        update_neighbours(tmux, argv[2])
         return 0
     pane = argv[1]
     socket = argv[2] if len(argv) > 2 else ""

@@ -218,6 +218,31 @@ class NeighbourTests(unittest.TestCase):
         self.assertEqual(w.right_neighbour_states(panes, only_for="%2"), {"%1": "working"})
 
 
+class ZOrderTests(unittest.TestCase):
+    LAYOUT = "abcd,80x24,0,0{40x24,0,0,1,39x24,41,0,2}"
+
+    def run_normalize(self, zoomed, done, panes="0\t41\t%2\n0\t0\t%1"):
+        tm = FakeTmux({w.ZORDER_FMT: "%s\t%s\t%s" % (zoomed, self.LAYOUT, done),
+                       w.PANE_POS_FMT: panes})
+        return w.normalize_zorder(tm, "@1"), tm
+
+    def test_reapplies_the_layout_when_the_pane_order_is_new(self):
+        changed, tm = self.run_normalize("0", "")
+        self.assertTrue(changed)
+        self.assertIn(["select-layout", "-t", "@1", self.LAYOUT], tm.calls)
+        self.assertIn(["set-option", "-w", "-t", "@1", "@osc7501_zorder", "%1 %2"], tm.calls)
+
+    def test_resizing_keeps_the_order_so_nothing_is_reapplied(self):
+        changed, tm = self.run_normalize("0", "%1 %2", panes="0\t50\t%2\n0\t0\t%1")
+        self.assertFalse(changed)
+        self.assertFalse(any(c[0] == "select-layout" for c in tm.calls))
+
+    def test_never_touches_a_zoomed_window(self):
+        changed, tm = self.run_normalize("1", "")
+        self.assertFalse(changed)
+        self.assertFalse(any(c[0] == "select-layout" for c in tm.calls))
+
+
 class FakeTmux:
     """Records the commands it is given; answers display-message queries."""
 

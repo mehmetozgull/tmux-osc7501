@@ -399,6 +399,32 @@ class Integration(unittest.TestCase):
             tmux("set", "-gu", "pane-border-style")
             tmux("set", "-gu", "pane-active-border-style")
 
+    def test_17_left_lines_normalise_pane_order(self):
+        tmux("set", "-g", "@osc7501-left-lines", "on")
+        try:
+            tmux("run-shell", os.path.join(ROOT, "osc7501.tmux"))
+            tmux("new-window", "-t", "t:9")
+            right = tmux("display", "-p", "-t", "t:9", "#{pane_id}")
+            tmux("split-window", "-hb", "-t", "t:9")  # a newer pane on the left
+            left = tmux("display", "-p", "-t", "t:9", "#{pane_id}")
+            marked = lambda: opt("t:9", "@osc7501_zorder", "-w")
+            self.assertEqual(wait_for(marked, "%s %s" % (left, right)), "%s %s" % (left, right))
+            # resizing keeps the order: the layout must not be re-applied
+            # (that could snap a mouse drag back)
+            tmux("resize-pane", "-t", left, "-R", "5")
+            resized = tmux("display", "-p", "-t", "t:9", "#{window_layout}")
+            time.sleep(0.6)
+            self.assertEqual(tmux("display", "-p", "-t", "t:9", "#{window_layout}"), resized)
+            tmux("resize-pane", "-Z", "-t", left)
+            time.sleep(0.5)
+            self.assertEqual(tmux("display", "-p", "-t", "t:9", "#{window_zoomed_flag}"), "1")
+        finally:
+            tmux("kill-window", "-t", "t:9", check=False)
+            tmux("set", "-gu", "@osc7501-left-lines")
+            tmux("run-shell", os.path.join(ROOT, "osc7501.tmux"))
+            tmux("set", "-gu", "pane-border-style")
+            tmux("set", "-gu", "pane-active-border-style")
+
     def socket(self):
         return tmux("display", "-p", "#{socket_path}") + ",0,0"
 
