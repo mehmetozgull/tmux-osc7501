@@ -369,6 +369,36 @@ class Integration(unittest.TestCase):
         self.assertIn("osc7501_watch.py", alive(self.p0))
         tmux("kill-window", "-t", "t:7")
 
+    def test_16_left_lines(self):
+        tmux("set", "-g", "@osc7501-left-lines", "on")
+        try:
+            tmux("run-shell", os.path.join(ROOT, "osc7501.tmux"))
+            self.assertIn("@osc7501_rn_state", tmux("show", "-gv", "pane-border-style"))
+            self.assertIn("@osc7501_rn_state", tmux("show", "-gv", "pane-active-border-style"))
+            hooks = tmux("show-hooks", "-g") + tmux("show-hooks", "-gw")
+            self.assertIn("window-layout-changed[7501]", hooks)
+            tmux("new-window", "-t", "t:8")
+            a = tmux("display", "-p", "-t", "t:8", "#{pane_id}")
+            self.assertTrue(wait_for(lambda: opt(a, "@osc7501_pid") != "", True))
+            b = self.new_pane("split-window", "-h", "-t", "t:8")
+            c = self.new_pane("split-window", "-h", "-t", "t:8")
+            tmux("select-layout", "-t", "t:8", "even-horizontal")
+            time.sleep(0.3)
+            rn = lambda p: opt(p, "@osc7501_rn_state")
+            self.emit(b, "blocked", "-a", "x")
+            self.assertEqual(wait_for(lambda: rn(a), "blocked"), "blocked")
+            self.emit(c, "working", "-a", "y")
+            self.assertEqual(wait_for(lambda: rn(b), "working"), "working")
+            self.assertEqual(rn(c), "")  # nothing to its right
+            tmux("kill-pane", "-t", b)  # c is now right of a: the layout hook
+            self.assertEqual(wait_for(lambda: rn(a), "working"), "working")
+        finally:
+            tmux("kill-window", "-t", "t:8", check=False)
+            tmux("set", "-gu", "@osc7501-left-lines")
+            tmux("run-shell", os.path.join(ROOT, "osc7501.tmux"))
+            tmux("set", "-gu", "pane-border-style")
+            tmux("set", "-gu", "pane-active-border-style")
+
     def socket(self):
         return tmux("display", "-p", "#{socket_path}") + ",0,0"
 

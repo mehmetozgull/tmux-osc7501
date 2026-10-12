@@ -93,6 +93,44 @@ if [ "$border" = on ] && [ "$(tmux show-option -gv pane-border-status)" = off ];
 fi
 place pane-border-format '#{E:@osc7501_pane_status}' "$border"
 
+# --- line colours ---------------------------------------------------------------
+# @osc7501_line_own: the pane's own state colour (for a top line drawn in
+# pane-border-format). With @osc7501-left-lines on, each pane also owns its
+# left border: tmux draws the border between two panes as part of the left
+# one, so its style reads @osc7501_rn_state, the right neighbour's state,
+# which the watchers and the window-layout-changed hook keep up to date.
+lc_active="$(opt @osc7501-line-active brightcyan)"
+lc_idle="$(opt @osc7501-line-idle colour240)"
+lc_blocked="$(opt @osc7501-line-blocked brightred)"
+lc_error="$(opt @osc7501-line-error brightred)"
+lc_working="$(opt @osc7501-line-working brightyellow)"
+lc_done="$(opt @osc7501-line-done brightgreen)"
+colour() { # colour STATE_FORMAT FALLBACK_STYLE
+	printf '#{?#{==:%s,blocked},fg=%s,#{?#{==:%s,error},fg=%s,#{?#{==:%s,working},fg=%s,#{?#{==:%s,done},fg=%s,%s}}}}' \
+		"$1" "$lc_blocked" "$1" "$lc_error" "$1" "$lc_working" "$1" "$lc_done" "$2"
+}
+# Build the values in plain variables: bash 3.2 brace-expands a
+# "#{?a,b,c}" nested inside "$(...)" after a line continuation.
+own_fallback="#{?pane_active,fg=$lc_active,fg=$lc_idle}"
+own_colour=$(colour '#{@osc7501_state}' "$own_fallback")
+tmux set-option -g @osc7501_line_own "$own_colour"
+if [ "$(opt @osc7501-left-lines off)" = on ]; then
+	border_colour=$(colour '#{@osc7501_rn_state}' "fg=$lc_idle")
+	# a border of the active pane: if the left pane is the active one this is
+	# the right pane's left line (not active), otherwise the right pane is active
+	active_fallback="#{?pane_active,fg=$lc_idle,fg=$lc_active}"
+	active_colour=$(colour '#{@osc7501_rn_state}' "$active_fallback")
+	tmux set-option -g pane-border-style "$border_colour"
+	tmux set-option -g pane-active-border-style "$active_colour"
+	tmux set-hook -g 'window-layout-changed[7501]' \
+		"run-shell -b \"'$py' '$DIR/scripts/osc7501_watch.py' --neighbours '#{window_id}'\""
+	tmux list-windows -a -F '#{window_id}' | while read -r win; do
+		"$py" "$DIR/scripts/osc7501_watch.py" --neighbours "$win"
+	done
+else
+	tmux set-hook -gu 'window-layout-changed[7501]'
+fi
+
 # --- inbox: list what reports something ----------------------------------------
 key="$(opt @osc7501-inbox-key A)"
 if [ "$key" != off ] && [ "$scope" = window ]; then

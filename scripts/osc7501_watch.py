@@ -265,6 +265,7 @@ DEFAULTS = {
     "icon-error": "#[fg=red]✗#[default]",
     "icon-done": "#[fg=green]✓#[default]",
     "icon-idle": "",
+    "left-lines": "off",
     "app-aliases": "claude-code=claude",
     "notify": "blocked,error,done",
     "notify-format": ("[#{window_index}#{?#{!=:#{window_panes},1},.#{pane_index},}"
@@ -319,6 +320,52 @@ class Tmux:
             return out.stdout.decode("utf-8", "replace")
         except (OSError, subprocess.SubprocessError):
             return ""
+
+
+def right_neighbour_states(panes, only_for=None):
+    """{pane id: state of its most urgent right neighbour ('' if none)}.
+
+    tmux draws the border between two panes as part of the left one, so for
+    that border to show the right pane's state (its "left line") the left
+    pane has to know it. With only_for, only the left neighbours of that pane
+    are returned: a watcher writes only what its own state changes.
+    """
+    result = {}
+    for left in panes:
+        rights = [p for p in panes if p["left"] == left["right"] + 2
+                  and p["top"] <= left["bottom"] and p["bottom"] >= left["top"]]
+        if only_for is not None and only_for not in [p["id"] for p in rights]:
+            continue
+        states = [p["state"] for p in rights if p["state"] in PRIORITY]
+        result[left["id"]] = max(states, key=PRIORITY.get) if states else ""
+    return result
+
+
+NEIGHBOUR_FMT = "\t".join("#{%s}" % f for f in (
+    "pane_id", "pane_left", "pane_right", "pane_top", "pane_bottom",
+    "@osc7501_state", "@osc7501_rn_state"))
+
+
+def update_neighbours(tmux, target, only_for=None):
+    """Write @osc7501_rn_state for the panes of TARGET's window."""
+    panes, current = [], {}
+    for line in tmux.run(["list-panes", "-t", target, "-F", NEIGHBOUR_FMT]).splitlines():
+        parts = line.split("\t")
+        if len(parts) != 7:
+            continue
+        pane, left, right, top, bottom, state, rn_state = parts
+        try:
+            geometry = [int(v) for v in (left, right, top, bottom)]
+        except ValueError:
+            continue
+        panes.append(dict(zip(("left", "right", "top", "bottom"), geometry), id=pane, state=state))
+        current[pane] = rn_state
+    cmds = [["set-option", "-p", "-t", pane, "@osc7501_rn_state", state] if state
+            else ["set-option", "-pu", "-t", pane, "@osc7501_rn_state"]
+            for pane, state in right_neighbour_states(panes, only_for).items()
+            if current.get(pane) != state]
+    if cmds:
+        tmux.run(*cmds)
 
 
 class Publisher:
@@ -379,6 +426,8 @@ class Publisher:
                 for name, v in self._pane_options(summary).items()]
         self.tmux.run(*cmds)
         self.update_window()
+        if self.cfg["left-lines"] == "on":
+            update_neighbours(self.tmux, self.pane, only_for=self.pane)
 
         if summary and summary["state"] in self.notify_states:
             if not prev or (prev.get("state"), prev.get("msg")) != (summary["state"], summary["msg"]):
@@ -492,8 +541,14 @@ class Publisher:
 
 def main(argv):
     if len(argv) < 2:
-        sys.stderr.write("usage: osc7501_watch.py PANE_ID [SOCKET]\n")
+        sys.stderr.write("usage: osc7501_watch.py PANE_ID [SOCKET]\n"
+                         "       osc7501_watch.py --neighbours WINDOW [SOCKET]\n")
         return 2
+    if argv[1] == "--neighbours":  # run by the window-layout-changed hook
+        if len(argv) < 3:
+            return 2
+        update_neighbours(Tmux(argv[3] if len(argv) > 3 else ""), argv[2])
+        return 0
     pane = argv[1]
     socket = argv[2] if len(argv) > 2 else ""
     tmux = Tmux(socket)

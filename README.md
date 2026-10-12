@@ -158,6 +158,8 @@ Ayarları `~/.tmux.conf` dosyasında, `run-shell` satırından **önce** tanıml
 | `@osc7501-inbox-key` | `A` | Liste için tuş (`prefix + A`); `off` ile kapatılır |
 | `@osc7501-status-append` | `on` | Etiket `window-status-format`'ın sonuna eklensin mi |
 | `@osc7501-pane-border` | `off` | `on`: durum pane kenarlığında da görünür |
+| `@osc7501-left-lines` | `off` | `on`: her pane'in sol çizgisi kendi durum renginde (bkz. Sol ve üst çizgi) |
+| `@osc7501-line-working` | `brightyellow` | Çizgi rengi (`-blocked`/`-error` `brightred`, `-done` `brightgreen`, `-active` `brightcyan`, `-idle` `colour240`) |
 | `@osc7501-python` | `python3` | Python yolu |
 
 Yer tutucular: `{app}`, `{state}`, `{kind}`, `{progress}`, `{msg}`, `{title}`. Boş kalan bir yer tutucu, önündeki boşlukla birlikte silinir. Bildirim metninde tmux formatlarını da kullanabilirsin.
@@ -176,16 +178,18 @@ set -g pane-border-format '#{?pane_active,#[reverse],}#{pane_index}#[default]#{o
 
 Claude Code pane başlığına o anki işin konusunu yazdığı için kenarlıkta şöyle bir satır görürsün: `2 ! claude "✳ refactor-auth"`.
 
-### Durum renginde üst çizgi
+### Sol ve üst çizgi
 
-İki pane arasındaki dikey çizgi tek renkli olabilir ve tmux onu her zaman soldaki pane'e verir; bu yüzden durum rengini dikey çizgilere vermek yanıltır (komşu pane'in rengi seçili pane'i ezer). Bunun yerine her pane durumunu kendi üst çizgisinde gösterebilir; paylaşılan dikey çizgiler nötr kalır, seçili pane camgöbeği çerçeveyle belli olur. Çizgi `#{R:━,#{pane_width}}` ile çizilir; birçok temada düz `yellow`/`red` koyu durduğu için parlak tonlar daha iyi okunur.
+`@osc7501-left-lines on` ile her pane durumunu kendi **sol** ve **üst** çizgisinde gösterir: onay bekleyen ya da hata veren kırmızı, çalışan sarı, biten yeşil; durumu olmayan seçili pane camgöbeği, diğerleri gri. Bir pane'in sağındaki çizgi, sağdaki komşunun sol çizgisidir.
+
+tmux iki pane arasındaki çizgiyi her zaman soldaki pane'in parçası olarak çizer. Bu yüzden her izleyici, kendi durumunu sol komşusuna `@osc7501_rn_state` olarak yazar; pane açılıp kapandığında ya da yer değiştirdiğinde `window-layout-changed` hook'u bunu baştan hesaplar. Eklenti `pane-border-style` ve `pane-active-border-style`'ı buna göre ayarlar. En soldaki pane'in sol çizgisi yoktur; o pane yalnız üst çizgisiyle görünür.
+
+Üst çizgiyi kendi formatında `#{E:@osc7501_line_own}` rengiyle çiz. Etiket metnine kendi rengini ver, çünkü kenarlık stili artık komşunun durumunu taşır:
 
 ```tmux
 set -g @osc7501-pane-border on
-set -g @osc7501-renk '#{?#{||:#{==:#{@osc7501_state},blocked},#{==:#{@osc7501_state},error}},fg=brightred,#{?#{==:#{@osc7501_state},working},fg=brightyellow,#{?#{==:#{@osc7501_state},done},fg=brightgreen,#{?pane_active,fg=brightcyan,fg=colour240}}}}'
-set -g pane-border-format '#{?pane_active,#[reverse],}#{pane_index}#[default]#{osc7501} "#{pane_title}" #[#{E:@osc7501-renk}]#{R:━,#{pane_width}}'
-set -g pane-border-style 'fg=colour240'
-set -g pane-active-border-style 'fg=brightcyan'
+set -g @osc7501-left-lines on
+set -g pane-border-format '#[fg=colour250]#{?pane_active,#[reverse],}#{pane_index}#[noreverse]#{osc7501}#[fg=colour250] "#{pane_title}" #[#{E:@osc7501_line_own}]#{R:━,#{pane_width}}'
 ```
 
 ### Etiketin yeri
@@ -202,7 +206,8 @@ Eklenti `#{osc7501}`'i status bar'da `#{E:@osc7501_status}`, pane kenarlığınd
 
 **Kendi formatında kullanabileceğin seçenekler:**
 
-- Pane seviyesi: `#{@osc7501_state}`, `#{@osc7501_app}`, `#{@osc7501_kind}`, `#{@osc7501_msg}`, `#{@osc7501_progress}`, `#{@osc7501_title}`, `#{@osc7501_pane_label}`, `#{@osc7501_pane_icon}`
+- Pane seviyesi: `#{@osc7501_state}`, `#{@osc7501_app}`, `#{@osc7501_kind}`, `#{@osc7501_msg}`, `#{@osc7501_progress}`, `#{@osc7501_title}`, `#{@osc7501_pane_label}`, `#{@osc7501_pane_icon}`, `#{@osc7501_rn_state}` (sağ komşunun durumu)
+- Genel: `#{E:@osc7501_line_own}` (pane'in kendi durum rengi, `fg=...`)
 - Pencere seviyesi: `#{@osc7501_label}`, `#{@osc7501_window_state}`, `#{@osc7501_window_app}`, `#{@osc7501_window_msg}`, `#{@osc7501_window_pane}`
 
 ## Bilinen sınırlar
@@ -234,7 +239,7 @@ python3 tests/integration_test.py   # gerçek tmux sunucusuyla uçtan uca testle
 
 ```sh
 for h in after-new-window after-split-window session-created session-window-changed \
-         client-session-changed after-select-pane pane-focus-in; do
+         client-session-changed after-select-pane pane-focus-in window-layout-changed; do
   tmux set-hook -gu "$h[7501]"
 done
 pkill -f osc7501_watch.py

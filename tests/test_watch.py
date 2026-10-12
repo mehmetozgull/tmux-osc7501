@@ -192,6 +192,32 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(w.display_text("abcdef", 4), "abc…")
 
 
+def geo(pid, left, width, state="", top=0, height=10):
+    return {"id": pid, "left": left, "right": left + width - 1,
+            "top": top, "bottom": top + height - 1, "state": state}
+
+
+class NeighbourTests(unittest.TestCase):
+    def test_side_by_side(self):
+        panes = [geo("%0", 0, 10), geo("%1", 11, 10, "blocked"), geo("%2", 22, 10, "working")]
+        self.assertEqual(w.right_neighbour_states(panes),
+                         {"%0": "blocked", "%1": "working", "%2": ""})
+
+    def test_most_urgent_of_stacked_right_neighbours(self):
+        panes = [geo("%0", 0, 10, height=21),
+                 geo("%1", 11, 10, "done", top=0, height=10),
+                 geo("%2", 11, 10, "blocked", top=11, height=10)]
+        self.assertEqual(w.right_neighbour_states(panes)["%0"], "blocked")
+
+    def test_panes_that_only_touch_at_a_corner_are_not_neighbours(self):
+        panes = [geo("%0", 0, 10, top=0, height=10), geo("%1", 11, 10, "blocked", top=11)]
+        self.assertEqual(w.right_neighbour_states(panes)["%0"], "")
+
+    def test_only_the_left_neighbours_of_one_pane(self):
+        panes = [geo("%0", 0, 10), geo("%1", 11, 10, "blocked"), geo("%2", 22, 10, "working")]
+        self.assertEqual(w.right_neighbour_states(panes, only_for="%2"), {"%1": "working"})
+
+
 class FakeTmux:
     """Records the commands it is given; answers display-message queries."""
 
@@ -234,6 +260,11 @@ class PublisherTests(unittest.TestCase):
         tm = FakeTmux()
         w.Publisher(tm, "%1").update(summary("idle"))
         self.assertTrue({"@osc7501_pane_label", "@osc7501_pane_icon"} <= tm.pane_unsets())
+
+    def test_left_lines_off_writes_no_neighbour_state(self):
+        tm = FakeTmux()
+        w.Publisher(tm, "%1").update(summary("blocked"))
+        self.assertFalse(any("@osc7501_rn_state" in c for c in tm.calls))
 
     def notified(self, where, scope=""):
         tm = FakeTmux({w.NOTIFY_QUERY: (where + " " + scope).strip()})
